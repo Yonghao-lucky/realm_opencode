@@ -389,7 +389,7 @@ install_command() {
     configured_model=$(write_or_update_config "$api_key" "$default_model")
     print_ok "配置已写入 $CONFIG_FILE"
     print_info "默认模型已设置为 $configured_model"
-    print_info "启动 OpenCode 后输入 /model，即可切换到任意 RealmRouter 模型。"
+    print_info "如 OpenCode 已在运行，请先重启；启动后输入 /models，即可切换到任意 RealmRouter 模型。"
 }
 
 update_key_command() {
@@ -428,7 +428,7 @@ switch_model_command() {
     fi
     rm -f /tmp/realm_opencode_switch.out
     print_ok "默认模型已切换为 realmrouter/$model_id"
-    print_info "用户启动 OpenCode 后，也可以通过 /model 再选择其他 RealmRouter 模型。"
+    print_info "如 OpenCode 已在运行，请先重启；启动后也可以通过 /models 再选择其他 RealmRouter 模型。"
 }
 
 test_command() {

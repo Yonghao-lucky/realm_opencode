@@ -36,11 +36,15 @@ chmod +x src/realm_opencode.sh src/install_realm_opencode.sh
 ./src/realm_opencode.sh
 ```
 
+> **重要**：如果您修改配置时 OpenCode 已经在运行，请在配置完成后手动重启 OpenCode，否则新配置可能不会立即生效。
+
 也可以直接执行安装命令：
 
 ```bash
 ./src/install_realm_opencode.sh --api-key sk-xxxx
 ```
+
+> **重要**：如果您修改配置时 OpenCode 已经在运行，请在配置完成后手动重启 OpenCode，否则新配置可能不会立即生效。
 
 ### 方式二：Windows PowerShell
 
@@ -51,6 +55,8 @@ Windows 用户可以直接下载 PowerShell 脚本后运行：
 Invoke-WebRequest -Uri "https://raw.githubusercontent.com/Yonghao-lucky/realm_opencode/main/src/realm_opencode.ps1" -OutFile "realm_opencode.ps1"
 .\realm_opencode.ps1
 ```
+
+> **重要**：如果您修改配置时 OpenCode 已经在运行，请在配置完成后手动重启 OpenCode，否则新配置可能不会立即生效。
 
 或从源码运行：
 
@@ -131,7 +137,7 @@ Linux/macOS 脚本启动后，您将看到如下主菜单：
 完成配置后，启动 OpenCode，输入以下命令：
 
 ```text
-/model
+/models
 ```
 
 然后就可以在 OpenCode 中选择并使用 RealmRouter 的模型。

@@ -158,7 +158,7 @@ function Install-RealmRouter {
     $config['model'] = "realmrouter/$DefaultModel"
     Save-Config $config
     Write-Ok "Config written to $ConfigFile"
-    Write-Info "Start OpenCode, then run /model to switch to any RealmRouter model."
+    Write-Info "If OpenCode is already running, restart it first. Then run /models to switch to any RealmRouter model."
 }
 
 function Update-RealmRouterKey {
@@ -234,7 +234,7 @@ function Switch-RealmRouterModel([string]$ModelId) {
     $config['model'] = "realmrouter/$ModelId"
     Save-Config $config
     Write-Ok "Default model changed to realmrouter/$ModelId"
-    Write-Info "OpenCode users can also run /model after startup to pick another RealmRouter model."
+    Write-Info "If OpenCode is already running, restart it first. Then users can run /models after startup to pick another RealmRouter model."
 }
 
 function Restore-RealmRouterBackup {
