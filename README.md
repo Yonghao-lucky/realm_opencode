@@ -2,7 +2,7 @@
 
 **RealmRouter OpenCode Manager** 是一个用于管理 OpenCode 配置文件的脚本工具，专为希望在 OpenCode 中一键接入 RealmRouter 大模型的用户设计。
 
-它可以帮助用户快速把 RealmRouter 的模型配置写入 OpenCode，避免手动编辑 JSON 配置出错；同时提供 API Key 更新、默认模型切换、配置备份与恢复、连通性测试等能力，让接入和日常使用都更省心。
+它可以帮助用户快速把 RealmRouter 的模型配置写入 OpenCode，避免手动编辑 JSON 配置出错；同时提供 API Key 更新、默认模型设置、配置备份与恢复、连通性测试等能力，让接入和日常使用都更省心。
 
 > 💖 **Special Sponsor / 特别赞助**
 >
@@ -18,7 +18,7 @@
 
 * **一键安装/重置**：自动将 RealmRouter 配置写入 `opencode.json`，并设置默认模型。
 * **API Key 管理**：支持更新 RealmRouter API Key，无需手动改配置文件。
-* **模型切换**：内置完整模型列表，可切换 OpenCode 默认使用的 RealmRouter 模型。
+* **模型切换**：优先实时拉取 RealmRouter 最新模型列表，失败时自动回退到内置模型列表。
 * **连通性测试**：使用当前 Key 和模型发起真实请求，快速检查配置是否可用。
 * **配置备份与恢复**：修改前自动备份，支持从历史备份中恢复。
 * **中文交互体验**：Linux/macOS 脚本提供中文菜单，更适合中文用户使用。
@@ -81,10 +81,10 @@ Linux/macOS 脚本启动后，您将看到如下主菜单：
 ========================================
  [1] 安装/重置 RealmRouter 配置
  [2] 更新 API Key
- [3] 切换默认模型
+ [3] 设置默认模型
  [4] 恢复备份
  [5] 测试连通性
- [6] 查看内置模型
+ [6] 查看模型列表
  [q] 退出
 ```
 
@@ -94,7 +94,7 @@ Linux/macOS 脚本启动后，您将看到如下主菜单：
 
 * 输入您的 RealmRouter API Key。
 * 脚本会先测试 Key 是否可用。
-* 如果本地已存在 `~/.config/opencode/opencode.json`，会先自动备份。
+* 如果检测到现有 OpenCode 配置文件，脚本会先自动备份。
 * 然后将 RealmRouter provider 和模型列表写入 OpenCode 配置。
 * 默认模型会设置为 `realmrouter/gpt-5.4`。
 
@@ -106,12 +106,13 @@ Linux/macOS 脚本启动后，您将看到如下主菜单：
 * 脚本会先验证 Key。
 * 验证成功后，仅更新 RealmRouter 的 API Key。
 
-### [3] 切换默认模型
+### [3] 设置默认模型
 
-如果您希望 OpenCode 默认使用其他 RealmRouter 模型，可以使用这个选项。
+如果您希望 OpenCode 启动时默认使用其他 RealmRouter 模型，可以使用这个选项。
 
-* 脚本会列出全部内置模型。
+* 脚本会优先实时拉取全部模型。
 * 选择目标模型后，会自动更新 `opencode.json` 中的默认模型。
+* 日常使用时，推荐直接在 OpenCode 内通过 `/models` 切换模型。
 
 ### [4] 恢复备份
 
@@ -128,9 +129,10 @@ Linux/macOS 脚本启动后，您将看到如下主菜单：
 * 发起一次真实请求测试连通性。
 * 如果 Key 无效、模型错误或网络异常，会直接报错提示。
 
-### [6] 查看内置模型
+### [6] 查看模型列表
 
-列出脚本当前内置支持的所有 RealmRouter 模型，方便查看和确认。
+* 优先列出当前账号实时可用的 RealmRouter 模型。
+* 如果网络异常或未配置 Key，会自动回退到脚本内置模型列表。
 
 ## 配置完成后怎么使用
 
@@ -142,14 +144,25 @@ Linux/macOS 脚本启动后，您将看到如下主菜单：
 
 然后就可以在 OpenCode 中选择并使用 RealmRouter 的模型。
 
-这也是推荐给用户的核心使用方式。
+这也是推荐给用户的核心使用方式；日常切换模型建议优先使用 `/models`，脚本更适合做首次配置和默认模型设置。
 
 ## 配置文件位置
 
-本工具主要修改 OpenCode 配置文件：
+本工具会按以下顺序查找 OpenCode 配置文件：
 
 ```text
-~/.config/opencode/opencode.json
+1. 命令行显式指定的配置路径
+2. 环境变量 OPENCODE_CONFIG
+3. 已存在的 $XDG_CONFIG_HOME/opencode/opencode.json
+4. 已存在的 ~/.config/opencode/opencode.json
+5. Windows 下已存在的 %APPDATA%\opencode\opencode.json
+```
+
+如果以上位置都没有现成配置文件，则会优先写入：
+
+```text
+$XDG_CONFIG_HOME/opencode/opencode.json（若设置了 XDG_CONFIG_HOME）
+~/.config/opencode/opencode.json（默认回退）
 ```
 
 写入的 RealmRouter provider 配置包括：
@@ -169,6 +182,7 @@ Linux/macOS 脚本启动后，您将看到如下主菜单：
 ./src/realm_opencode.sh test
 ./src/realm_opencode.sh restore
 ./src/realm_opencode.sh list-models
+./src/realm_opencode.sh --config /custom/path/opencode.json install --api-key sk-xxxx
 ```
 
 ### Windows PowerShell
@@ -180,11 +194,12 @@ Linux/macOS 脚本启动后，您将看到如下主菜单：
 .\src\realm_opencode.ps1 test
 .\src\realm_opencode.ps1 restore
 .\src\realm_opencode.ps1 list-models
+.\src\realm_opencode.ps1 -ConfigPath C:\custom\opencode.json install -ApiKey sk-xxxx
 ```
 
-## 内置模型
+## 内置兜底模型
 
-当前脚本内置支持多种主流模型，包括但不限于：
+脚本在正常情况下会实时从 RealmRouter 拉取模型列表；以下内容是内置兜底模型示例，用于网络异常或未获取到实时列表时回退：
 
 ### DeepSeek
 * `deepseek-ai/DeepSeek-R1`
@@ -237,7 +252,9 @@ Linux/macOS 脚本启动后，您将看到如下主菜单：
 ## 注意事项
 
 * 如果 `opencode.json` 已存在，脚本会先自动备份，再执行修改。
-* `update-key` 在已存在 RealmRouter 配置时只更新 Key；如果未安装过，会自动回退到完整安装。
+* 如需强制指定配置文件，可使用 Linux/macOS 的 `--config`，或 Windows 的 `-ConfigPath`；也可通过环境变量 `OPENCODE_CONFIG` 指定。
+* `update-key` 在已存在 RealmRouter 配置时只更新 Key，并同步刷新模型列表；如果未安装过，会自动回退到完整安装。
+* `list-models` 与 `switch-model` 会优先实时获取模型列表；失败时自动回退到内置列表。
 * `test` 会发起真实请求，因此需要网络正常且 API Key 有效。
 * 推荐用户使用脚本接入，不建议手动改 JSON 配置，避免格式错误或字段遗漏。
 

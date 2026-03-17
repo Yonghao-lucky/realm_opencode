@@ -4,9 +4,11 @@ set -euo pipefail
 
 SCRIPT_PATH="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
 SCRIPT_DIR="$(dirname "$SCRIPT_PATH")"
-CONFIG_DIR="$HOME/.config/opencode"
-CONFIG_FILE="$CONFIG_DIR/opencode.json"
-BACKUP_DIR="$CONFIG_DIR/backups"
+CONFIG_DIR=""
+CONFIG_FILE=""
+BACKUP_DIR=""
+CONFIG_SOURCE=""
+CONFIG_OVERRIDE="${OPENCODE_CONFIG:-}"
 TIMESTAMP="$(date +"%Y%m%d_%H%M%S")"
 API_BASE_URL="https://realmrouter.cn/v1"
 DEFAULT_MODEL="gpt-5.4"
@@ -66,20 +68,27 @@ usage() {
     cat <<'EOF'
 用法:
   ./realm_opencode.sh
-  ./realm_opencode.sh install [--api-key <key>] [--skip-verify]
-  ./realm_opencode.sh update-key [--api-key <key>] [--skip-verify]
-  ./realm_opencode.sh switch-model [model-id]
-  ./realm_opencode.sh test
-  ./realm_opencode.sh restore
+  ./realm_opencode.sh [--config <path>] install [--api-key <key>] [--skip-verify]
+  ./realm_opencode.sh [--config <path>] update-key [--api-key <key>] [--skip-verify]
+  ./realm_opencode.sh [--config <path>] switch-model [model-id]
+  ./realm_opencode.sh [--config <path>] test
+  ./realm_opencode.sh [--config <path>] restore
   ./realm_opencode.sh list-models
 
 命令:
   install        备份并写入 RealmRouter 到 OpenCode 配置
   update-key     仅更新 RealmRouter API Key
-  switch-model   切换 OpenCode 默认使用的 RealmRouter 模型
+  switch-model   设置 OpenCode 默认使用的 RealmRouter 模型
   test           测试当前 Key 和模型是否可以连通 RealmRouter
   restore        从备份恢复配置文件
-  list-models    输出内置模型列表
+  list-models    输出模型列表（优先实时获取）
+
+配置路径查找顺序:
+  1. --config 显式传入路径
+  2. 环境变量 OPENCODE_CONFIG
+  3. 已存在的 $XDG_CONFIG_HOME/opencode/opencode.json
+  4. 已存在的 $HOME/.config/opencode/opencode.json
+  5. 默认写入到上述优先级更高的目录
 EOF
 }
 
@@ -93,6 +102,39 @@ require_cmd() {
 ensure_env() {
     require_cmd python3
     require_cmd curl
+}
+
+resolve_config_path() {
+    local xdg_home="${XDG_CONFIG_HOME:-}"
+    local xdg_candidate=""
+    local home_candidate="$HOME/.config/opencode/opencode.json"
+
+    if [ -n "$xdg_home" ]; then
+        xdg_candidate="$xdg_home/opencode/opencode.json"
+    fi
+
+    if [ -n "$CONFIG_OVERRIDE" ]; then
+        CONFIG_FILE="$CONFIG_OVERRIDE"
+        CONFIG_SOURCE="override"
+    elif [ -n "$xdg_candidate" ] && [ -f "$xdg_candidate" ]; then
+        CONFIG_FILE="$xdg_candidate"
+        CONFIG_SOURCE="existing-xdg"
+    elif [ -f "$home_candidate" ]; then
+        CONFIG_FILE="$home_candidate"
+        CONFIG_SOURCE="existing-home"
+    elif [ -n "$xdg_candidate" ]; then
+        CONFIG_FILE="$xdg_candidate"
+        CONFIG_SOURCE="default-xdg"
+    else
+        CONFIG_FILE="$home_candidate"
+        CONFIG_SOURCE="default-home"
+    fi
+
+    CONFIG_DIR="$(dirname "$CONFIG_FILE")"
+    BACKUP_DIR="$CONFIG_DIR/backups"
+}
+
+ensure_config_dirs() {
     mkdir -p "$CONFIG_DIR"
     mkdir -p "$BACKUP_DIR"
 }
@@ -113,6 +155,7 @@ prompt_api_key() {
 
 backup_config() {
     if [ -f "$CONFIG_FILE" ]; then
+        ensure_config_dirs
         local backup_file="$BACKUP_DIR/opencode.json.bak.$TIMESTAMP"
         cp "$CONFIG_FILE" "$backup_file"
         print_ok "已创建备份: $backup_file"
@@ -155,7 +198,10 @@ PY
 }
 
 load_model_names() {
-    MODELS_JSON_DATA="$MODELS_JSON" python3 - <<'PY'
+    local api_key="${1:-}"
+    local models_json
+    models_json=$(get_models_json "$api_key")
+    MODELS_JSON_DATA="$models_json" python3 - <<'PY'
 import json
 import os
 models = json.loads(os.environ['MODELS_JSON_DATA'])
@@ -164,14 +210,87 @@ for item in models:
 PY
 }
 
+fetch_remote_models_json() {
+    local api_key="$1"
+    [ -n "$api_key" ] || return 1
+
+    local response
+    local http_code
+    response=$(curl -s -w "\n%{http_code}" -X GET "$API_BASE_URL/models" \
+        -H "Authorization: Bearer $api_key" \
+        -H "Content-Type: application/json" 2>/dev/null || true)
+    http_code=$(printf '%s' "$response" | python3 -c 'import sys; lines=sys.stdin.read().splitlines(); print(lines[-1] if lines else "")')
+    [ "$http_code" = "200" ] || return 1
+
+    printf '%s' "$response" | python3 -c '
+import json
+import sys
+
+def classify_provider(model_id):
+    lower = model_id.lower()
+    if lower.startswith("claude") or lower.startswith("anthropic/"):
+        return "Anthropic"
+    if lower.startswith("gemini") or lower.startswith("google/"):
+        return "Google"
+    if lower.startswith("moonshot") or "kimi" in lower:
+        return "Moonshot"
+    if lower.startswith("minimax") or "minimax" in lower:
+        return "MiniMax"
+    if lower.startswith("doubao") or "bytedance" in lower:
+        return "ByteDance"
+    if lower.startswith("zai-org/") or lower.startswith("glm"):
+        return "Z.AI"
+    if lower.startswith("qwen") or "qwen" in lower:
+        return "Qwen"
+    if lower.startswith("deepseek") or "deepseek" in lower:
+        return "DeepSeek"
+    if lower.startswith("gpt") or lower.startswith("openai/"):
+        return "OpenAI"
+    return "Other"
+
+lines = sys.stdin.read().splitlines()
+payload = json.loads("\n".join(lines[:-1]))
+models = []
+for item in payload.get("data", []):
+    model_id = item.get("id")
+    if not model_id:
+        continue
+    models.append({
+        "id": model_id,
+        "name": item.get("name") or model_id,
+        "group": classify_provider(model_id),
+    })
+models.sort(key=lambda item: (item["group"], item["name"].lower()))
+print(json.dumps(models, ensure_ascii=False))
+' || return 1
+}
+
+get_models_json() {
+    local api_key="${1:-}"
+    local models_json
+    if models_json=$(fetch_remote_models_json "$api_key"); then
+        printf '%s' "$models_json"
+        return 0
+    fi
+    if [ -n "$api_key" ]; then
+        print_warn "实时拉取模型列表失败，已回退到内置模型列表。" >&2
+    fi
+    printf '%s' "$MODELS_JSON"
+}
+
 list_models() {
-    load_model_names | while IFS=$'\t' read -r group model_id name; do
+    local api_key=""
+    api_key=$(get_current_key 2>/dev/null || true)
+    load_model_names "$api_key" | while IFS=$'\t' read -r group model_id name; do
         printf '%-10s %s (%s)\n' "$group" "$model_id" "$name"
     done
 }
 
 choose_model_interactive() {
-    MODELS_JSON_DATA="$MODELS_JSON" python3 - <<'PY'
+    local api_key="${1:-}"
+    local models_json
+    models_json=$(get_models_json "$api_key")
+    MODELS_JSON_DATA="$models_json" python3 - <<'PY' >&2
 import json
 import os
 models = json.loads(os.environ['MODELS_JSON_DATA'])
@@ -180,7 +299,7 @@ for idx, item in enumerate(models, start=1):
 PY
     local selection
     read -r -p "请输入模型编号: " selection
-    MODELS_JSON_DATA="$MODELS_JSON" python3 - "$selection" <<'PY'
+    MODELS_JSON_DATA="$models_json" python3 - "$selection" <<'PY'
 import json
 import os
 import sys
@@ -199,7 +318,9 @@ PY
 write_or_update_config() {
     local api_key="$1"
     local model_id="${2:-$DEFAULT_MODEL}"
-    MODELS_JSON_DATA="$MODELS_JSON" python3 - "$CONFIG_FILE" "$api_key" "$model_id" <<'PY'
+    local models_json
+    models_json=$(get_models_json "$api_key")
+    MODELS_JSON_DATA="$models_json" python3 - "$CONFIG_FILE" "$api_key" "$model_id" <<'PY'
 import json
 import os
 import sys
@@ -243,7 +364,9 @@ PY
 
 update_key_only() {
     local api_key="$1"
-    python3 - "$CONFIG_FILE" "$api_key" <<'PY'
+    local models_json
+    models_json=$(get_models_json "$api_key")
+    MODELS_JSON_DATA="$models_json" python3 - "$CONFIG_FILE" "$api_key" <<'PY'
 import json
 import os
 import sys
@@ -268,6 +391,8 @@ if not isinstance(options, dict):
 realm['options'] = options
 options['baseURL'] = 'https://realmrouter.cn/v1'
 options['apiKey'] = api_key
+models = json.loads(os.environ['MODELS_JSON_DATA'])
+realm['models'] = {item['id']: {'name': item['name']} for item in models}
 
 with open(config_path, 'w', encoding='utf-8') as f:
     json.dump(config, f, indent=2, ensure_ascii=False)
@@ -278,7 +403,10 @@ PY
 
 switch_model_config() {
     local model_id="$1"
-    MODELS_JSON_DATA="$MODELS_JSON" python3 - "$CONFIG_FILE" "$model_id" <<'PY'
+    local api_key="${2:-}"
+    local models_json
+    models_json=$(get_models_json "$api_key")
+    MODELS_JSON_DATA="$models_json" python3 - "$CONFIG_FILE" "$model_id" <<'PY'
 import json
 import os
 import sys
@@ -339,6 +467,7 @@ PY
 }
 
 restore_backup() {
+    ensure_config_dirs
     if ! compgen -G "$BACKUP_DIR/opencode.json.bak.*" >/dev/null; then
         print_error "未在 $BACKUP_DIR 中找到备份文件。"
         exit 1
@@ -385,11 +514,12 @@ install_command() {
     fi
 
     backup_config
+    ensure_config_dirs
     local configured_model
     configured_model=$(write_or_update_config "$api_key" "$default_model")
     print_ok "配置已写入 $CONFIG_FILE"
     print_info "默认模型已设置为 $configured_model"
-    print_info "如 OpenCode 已在运行，请先重启；启动后输入 /models，即可切换到任意 RealmRouter 模型。"
+    print_info "如 OpenCode 已在运行，请先重启；日常切换推荐在 OpenCode 内输入 /models。"
 }
 
 update_key_command() {
@@ -413,22 +543,24 @@ update_key_command() {
 
 switch_model_command() {
     local model_id="${1:-}"
+    local api_key=""
+    api_key=$(get_current_key 2>/dev/null || true)
     if [ -z "$model_id" ]; then
-        if ! model_id=$(choose_model_interactive); then
+        if ! model_id=$(choose_model_interactive "$api_key"); then
             print_error "模型选择无效。"
             exit 1
         fi
     fi
 
     backup_config
-    if ! switch_model_config "$model_id" >/tmp/realm_opencode_switch.out 2>/dev/null; then
+    if ! switch_model_config "$model_id" "$api_key" >/tmp/realm_opencode_switch.out 2>/dev/null; then
         rm -f /tmp/realm_opencode_switch.out
-        print_error "切换模型失败，请确认配置文件存在且模型 ID 正确。"
+        print_error "设置默认模型失败，请确认配置文件存在且模型 ID 正确。"
         exit 1
     fi
     rm -f /tmp/realm_opencode_switch.out
-    print_ok "默认模型已切换为 realmrouter/$model_id"
-    print_info "如 OpenCode 已在运行，请先重启；启动后也可以通过 /models 再选择其他 RealmRouter 模型。"
+    print_ok "默认模型已设置为 realmrouter/$model_id"
+    print_info "如 OpenCode 已在运行，请先重启；日常切换推荐在 OpenCode 内使用 /models。"
 }
 
 test_command() {
@@ -449,10 +581,10 @@ show_menu() {
 ========================================
  [1] 安装/重置 RealmRouter 配置
  [2] 更新 API Key
- [3] 切换默认模型
+ [3] 设置默认模型
  [4] 恢复备份
  [5] 测试连通性
- [6] 查看内置模型
+ [6] 查看模型列表
  [q] 退出
 EOF
 }
@@ -498,9 +630,36 @@ interactive_main() {
 main() {
     ensure_env
 
-    local command="${1:-}"
-    if [ $# -gt 0 ]; then
-        shift
+    local filtered_args=()
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --config)
+                if [ $# -lt 2 ]; then
+                    print_error "--config 需要提供路径。"
+                    exit 1
+                fi
+                CONFIG_OVERRIDE="$2"
+                shift 2
+                ;;
+            *)
+                filtered_args+=("$1")
+                shift
+                ;;
+        esac
+    done
+
+    resolve_config_path
+
+    local command="${filtered_args[0]:-}"
+    if [ ${#filtered_args[@]} -gt 0 ]; then
+        if [ ${#filtered_args[@]} -gt 1 ]; then
+            filtered_args=("${filtered_args[@]:1}")
+            set -- "${filtered_args[@]}"
+        else
+            set --
+        fi
+    else
+        set --
     fi
 
     case "$command" in

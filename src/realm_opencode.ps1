@@ -2,9 +2,11 @@
 
 $ScriptPath = $MyInvocation.MyCommand.Path
 $ScriptDir = Split-Path -Parent $ScriptPath
-$ConfigDir = Join-Path $env:USERPROFILE ".config/opencode"
-$ConfigFile = Join-Path $ConfigDir "opencode.json"
-$BackupDir = Join-Path $ConfigDir "backups"
+$ConfigDir = $null
+$ConfigFile = $null
+$BackupDir = $null
+$ConfigSource = $null
+$ConfigOverride = $env:OPENCODE_CONFIG
 $ApiBaseUrl = "https://realmrouter.cn/v1"
 $DefaultModel = "gpt-5.4"
 
@@ -49,6 +51,51 @@ function Write-Warn($Message) { Write-Host "[!] $Message" -ForegroundColor Yello
 function Write-Fail($Message) { Write-Host "[x] $Message" -ForegroundColor Red }
 
 function Ensure-Environment {
+}
+
+function Resolve-ConfigPath {
+    $candidates = @()
+
+    if ($ConfigOverride) {
+        $script:ConfigFile = $ConfigOverride
+        $script:ConfigSource = 'override'
+    } else {
+        if ($env:XDG_CONFIG_HOME) {
+            $candidates += @{
+                Path = (Join-Path $env:XDG_CONFIG_HOME "opencode/opencode.json")
+                Source = 'xdg'
+            }
+        }
+        if ($env:USERPROFILE) {
+            $candidates += @{
+                Path = (Join-Path $env:USERPROFILE ".config/opencode/opencode.json")
+                Source = 'userprofile'
+            }
+        }
+        if ($env:APPDATA) {
+            $candidates += @{
+                Path = (Join-Path $env:APPDATA "opencode/opencode.json")
+                Source = 'appdata'
+            }
+        }
+
+        $existing = $candidates | Where-Object { Test-Path $_.Path } | Select-Object -First 1
+        if ($existing) {
+            $script:ConfigFile = $existing.Path
+            $script:ConfigSource = "existing-$($existing.Source)"
+        } elseif ($candidates.Count -gt 0) {
+            $script:ConfigFile = $candidates[0].Path
+            $script:ConfigSource = "default-$($candidates[0].Source)"
+        } else {
+            throw "Could not determine a config path from USERPROFILE or APPDATA."
+        }
+    }
+
+    $script:ConfigDir = Split-Path -Parent $script:ConfigFile
+    $script:BackupDir = Join-Path $script:ConfigDir "backups"
+}
+
+function Ensure-ConfigDirectories {
     New-Item -ItemType Directory -Path $ConfigDir -Force | Out-Null
     New-Item -ItemType Directory -Path $BackupDir -Force | Out-Null
 }
@@ -57,8 +104,62 @@ function Get-ModelCatalog {
     return $ModelsJson | ConvertFrom-Json
 }
 
+function Get-ProviderName([string]$ModelId) {
+    $modelIdLower = $ModelId.ToLowerInvariant()
+
+    if ($modelIdLower.StartsWith("claude") -or $modelIdLower.StartsWith("anthropic/")) { return "Anthropic" }
+    if ($modelIdLower.StartsWith("gemini") -or $modelIdLower.StartsWith("google/")) { return "Google" }
+    if ($modelIdLower.StartsWith("moonshot") -or $modelIdLower.Contains("kimi")) { return "Moonshot" }
+    if ($modelIdLower.StartsWith("minimax") -or $modelIdLower.Contains("minimax")) { return "MiniMax" }
+    if ($modelIdLower.StartsWith("doubao") -or $modelIdLower.Contains("bytedance")) { return "ByteDance" }
+    if ($modelIdLower.StartsWith("zai-org/") -or $modelIdLower.StartsWith("glm")) { return "Z.AI" }
+    if ($modelIdLower.StartsWith("qwen") -or $modelIdLower.Contains("qwen")) { return "Qwen" }
+    if ($modelIdLower.StartsWith("deepseek") -or $modelIdLower.Contains("deepseek")) { return "DeepSeek" }
+    if ($modelIdLower.StartsWith("gpt") -or $modelIdLower.StartsWith("openai/")) { return "OpenAI" }
+
+    return "Other"
+}
+
+function Get-RemoteModels {
+    param([string]$ApiKey)
+
+    if ([string]::IsNullOrWhiteSpace($ApiKey)) {
+        throw "API key is required to fetch models."
+    }
+
+    $response = Invoke-RestMethod -Uri "$ApiBaseUrl/models" -Method Get -Headers @{ Authorization = "Bearer $ApiKey" } -ErrorAction Stop
+    $models = @()
+
+    foreach ($item in $response.data) {
+        if ([string]::IsNullOrWhiteSpace($item.id)) {
+            continue
+        }
+
+        $displayName = if ([string]::IsNullOrWhiteSpace($item.name)) { $item.id } else { $item.name }
+        $models += [PSCustomObject]@{
+            id = $item.id
+            name = $displayName
+            group = Get-ProviderName -ModelId $item.id
+        }
+    }
+
+    return @($models | Sort-Object group, name)
+}
+
+function Get-EffectiveModels([string]$ApiKey) {
+    try {
+        return Get-RemoteModels -ApiKey $ApiKey
+    } catch {
+        if (-not [string]::IsNullOrWhiteSpace($ApiKey)) {
+            Write-Warn "Failed to fetch model list in realtime. Falling back to bundled models."
+        }
+        return @(Get-ModelCatalog)
+    }
+}
+
 function Backup-Config {
     if (Test-Path $ConfigFile) {
+        Ensure-ConfigDirectories
         $timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
         $backupFile = Join-Path $BackupDir "opencode.json.bak.$timestamp"
         Copy-Item $ConfigFile $backupFile -Force
@@ -118,12 +219,13 @@ function Load-Config {
 }
 
 function Save-Config([hashtable]$Config) {
+    Ensure-ConfigDirectories
     $Config | ConvertTo-Json -Depth 100 | Set-Content $ConfigFile -Encoding UTF8
 }
 
 function Get-RealmProvider([string]$ApiKey) {
     $models = @{}
-    foreach ($item in Get-ModelCatalog) {
+    foreach ($item in Get-EffectiveModels -ApiKey $ApiKey) {
         $models[$item.id] = @{ name = $item.name }
     }
     return @{
@@ -158,7 +260,7 @@ function Install-RealmRouter {
     $config['model'] = "realmrouter/$DefaultModel"
     Save-Config $config
     Write-Ok "Config written to $ConfigFile"
-    Write-Info "If OpenCode is already running, restart it first. Then run /models to switch to any RealmRouter model."
+    Write-Info "If OpenCode is already running, restart it first. For day-to-day switching, use /models inside OpenCode."
 }
 
 function Update-RealmRouterKey {
@@ -193,12 +295,26 @@ function Update-RealmRouterKey {
     }
     $config['provider']['realmrouter']['options']['baseURL'] = 'https://realmrouter.cn/v1'
     $config['provider']['realmrouter']['options']['apiKey'] = $ApiKey
+    $models = @{}
+    foreach ($item in Get-EffectiveModels -ApiKey $ApiKey) {
+        $models[$item.id] = @{ name = $item.name }
+    }
+    $config['provider']['realmrouter']['models'] = $models
     Save-Config $config
     Write-Ok "RealmRouter API key updated."
 }
 
+function Get-CurrentApiKey {
+    $config = Load-Config
+    try {
+        return $config['provider']['realmrouter']['options']['apiKey']
+    } catch {
+        return $null
+    }
+}
+
 function Select-RealmRouterModel {
-    $models = Get-ModelCatalog
+    $models = Get-EffectiveModels -ApiKey (Get-CurrentApiKey)
     for ($i = 0; $i -lt $models.Count; $i++) {
         $item = $models[$i]
         Write-Host ("[{0}] {1} | {2} | {3}" -f ($i + 1), $item.group, $item.name, $item.id)
@@ -217,10 +333,10 @@ function Select-RealmRouterModel {
 }
 
 function Switch-RealmRouterModel([string]$ModelId) {
-    $models = Get-ModelCatalog
+    $models = Get-EffectiveModels -ApiKey (Get-CurrentApiKey)
     $validIds = @($models | ForEach-Object { $_.id })
     if ($validIds -notcontains $ModelId) {
-        Write-Fail "Model id not found in bundled catalog: $ModelId"
+        Write-Fail "Model id not found in available model list: $ModelId"
         exit 1
     }
 
@@ -233,11 +349,12 @@ function Switch-RealmRouterModel([string]$ModelId) {
     $config = Load-Config
     $config['model'] = "realmrouter/$ModelId"
     Save-Config $config
-    Write-Ok "Default model changed to realmrouter/$ModelId"
-    Write-Info "If OpenCode is already running, restart it first. Then users can run /models after startup to pick another RealmRouter model."
+    Write-Ok "Default model set to realmrouter/$ModelId"
+    Write-Info "If OpenCode is already running, restart it first. For day-to-day switching, use /models inside OpenCode."
 }
 
 function Restore-RealmRouterBackup {
+    Ensure-ConfigDirectories
     $backups = Get-ChildItem $BackupDir -Filter 'opencode.json.bak.*' | Sort-Object Name -Descending
     if (-not $backups) {
         Write-Fail "No backups found in $BackupDir"
@@ -284,7 +401,7 @@ function Test-RealmRouterCurrentConfig {
 }
 
 function Show-Models {
-    foreach ($item in Get-ModelCatalog) {
+    foreach ($item in Get-EffectiveModels -ApiKey (Get-CurrentApiKey)) {
         Write-Host ("{0,-10} {1} ({2})" -f $item.group, $item.id, $item.name)
     }
 }
@@ -295,10 +412,10 @@ function Show-Menu {
     Write-Host "========================================"
     Write-Host " [1] Install / Reset RealmRouter config"
     Write-Host " [2] Update API key"
-    Write-Host " [3] Switch default model"
+    Write-Host " [3] Set default model"
     Write-Host " [4] Restore backup"
     Write-Host " [5] Test connectivity"
-    Write-Host " [6] List bundled models"
+    Write-Host " [6] List models"
     Write-Host " [q] Quit"
 }
 
@@ -334,29 +451,60 @@ function Show-Usage {
     @"
 Usage:
   .\realm_opencode.ps1
-  .\realm_opencode.ps1 install [-ApiKey <key>] [-SkipVerify]
-  .\realm_opencode.ps1 update-key [-ApiKey <key>] [-SkipVerify]
-  .\realm_opencode.ps1 switch-model [-ModelId <id>]
-  .\realm_opencode.ps1 test
-  .\realm_opencode.ps1 restore
+  .\realm_opencode.ps1 [-ConfigPath <path>] install [-ApiKey <key>] [-SkipVerify]
+  .\realm_opencode.ps1 [-ConfigPath <path>] update-key [-ApiKey <key>] [-SkipVerify]
+  .\realm_opencode.ps1 [-ConfigPath <path>] switch-model [-ModelId <id>]
+  .\realm_opencode.ps1 [-ConfigPath <path>] test
+  .\realm_opencode.ps1 [-ConfigPath <path>] restore
   .\realm_opencode.ps1 list-models
+
+Config path priority:
+  1. -ConfigPath explicit path
+  2. OPENCODE_CONFIG environment variable
+  3. Existing XDG_CONFIG_HOME\opencode\opencode.json
+  4. Existing USERPROFILE\.config\opencode\opencode.json
+  5. Existing APPDATA\opencode\opencode.json
+  6. Default write target uses the highest-priority available base directory
+
+Model list behavior:
+  - Prefer realtime fetch from RealmRouter
+  - Fall back to bundled models when fetch fails
 "@
 }
 
 Ensure-Environment
 
-$Command = if ($args.Count -gt 0) { $args[0] } else { "" }
+$remainingArgs = [System.Collections.Generic.List[string]]::new()
+for ($i = 0; $i -lt $args.Count; $i++) {
+    switch ($args[$i]) {
+        '-ConfigPath' {
+            if ($i + 1 -ge $args.Count) {
+                Write-Fail "-ConfigPath requires a path value."
+                exit 1
+            }
+            $script:ConfigOverride = $args[$i + 1]
+            $i++
+        }
+        default {
+            $remainingArgs.Add($args[$i])
+        }
+    }
+}
+
+Resolve-ConfigPath
+
+$Command = if ($remainingArgs.Count -gt 0) { $remainingArgs[0] } else { "" }
 
 switch ($Command) {
     "" { Start-InteractiveMenu }
     "install" {
         $apiKey = ""
         $skipVerify = $false
-        for ($i = 1; $i -lt $args.Count; $i++) {
-            switch ($args[$i]) {
-                "-ApiKey" { $i++; $apiKey = $args[$i] }
+        for ($i = 1; $i -lt $remainingArgs.Count; $i++) {
+            switch ($remainingArgs[$i]) {
+                "-ApiKey" { $i++; $apiKey = $remainingArgs[$i] }
                 "-SkipVerify" { $skipVerify = $true }
-                default { Write-Fail "Unknown argument: $($args[$i])"; Show-Usage; exit 1 }
+                default { Write-Fail "Unknown argument: $($remainingArgs[$i])"; Show-Usage; exit 1 }
             }
         }
         $apiKey = Get-ApiKey $apiKey
@@ -365,18 +513,18 @@ switch ($Command) {
     "update-key" {
         $apiKey = ""
         $skipVerify = $false
-        for ($i = 1; $i -lt $args.Count; $i++) {
-            switch ($args[$i]) {
-                "-ApiKey" { $i++; $apiKey = $args[$i] }
+        for ($i = 1; $i -lt $remainingArgs.Count; $i++) {
+            switch ($remainingArgs[$i]) {
+                "-ApiKey" { $i++; $apiKey = $remainingArgs[$i] }
                 "-SkipVerify" { $skipVerify = $true }
-                default { Write-Fail "Unknown argument: $($args[$i])"; Show-Usage; exit 1 }
+                default { Write-Fail "Unknown argument: $($remainingArgs[$i])"; Show-Usage; exit 1 }
             }
         }
         $apiKey = Get-ApiKey $apiKey
         Update-RealmRouterKey -ApiKey $apiKey -SkipVerify:$skipVerify
     }
     "switch-model" {
-        $modelId = if ($args.Count -gt 1) { $args[1] } else { Select-RealmRouterModel }
+        $modelId = if ($remainingArgs.Count -gt 1) { $remainingArgs[1] } else { Select-RealmRouterModel }
         Switch-RealmRouterModel -ModelId $modelId
     }
     "test" { Test-RealmRouterCurrentConfig }
